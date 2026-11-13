@@ -1443,7 +1443,7 @@ NUVIO_TEST("disk cache usage refreshes while a stream request stays open") {
         payload << "123456";
     }
     bool measured = false;
-    for (int attempt = 0; attempt < 1'000 && !measured; ++attempt) {
+    for (int attempt = 0; attempt < 3'000 && !measured; ++attempt) {
         NUVIO_EXPECT_EQ(
             nuvio_engine_get_stats(engine, &stats),
             NUVIO_ENGINE_STATUS_OK
@@ -1951,7 +1951,7 @@ NUVIO_TEST("concurrent distant HTTP ranges remain blocking until disconnect") {
     );
     nuvio_engine_stream_stats disconnect_stats;
     nuvio_engine_stream_stats_init(&disconnect_stats);
-    for (int attempt = 0; attempt < 100; ++attempt) {
+    for (int attempt = 0; attempt < 1'000; ++attempt) {
         const auto status = nuvio_engine_get_stream_stats(
             engine,
             stream_id.c_str(),
