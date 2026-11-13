@@ -25,9 +25,17 @@ case "$target_architecture" in
     aarch64) configure_target=linux-aarch64 ;;
     *) echo "unsupported Linux architecture: $target_architecture" >&2; exit 2 ;;
 esac
+
+# Another architecture than the build machine's own is cross-compiled. OpenSSL
+# already builds without running any target binary here: no-apps, no-docs,
+# no-tests, and no-fips leave nothing that would need the target to execute.
+cross_prefix=""
 if [[ "$(uname -m)" != "$target_architecture" ]]; then
-    echo "container architecture does not match $target_architecture" >&2
-    exit 2
+    cross_prefix="$target_architecture-linux-gnu-"
+    if ! command -v "${cross_prefix}gcc" >/dev/null 2>&1; then
+        echo "missing cross compiler: ${cross_prefix}gcc" >&2
+        exit 2
+    fi
 fi
 
 downloads="$output_root/downloads"
@@ -78,9 +86,11 @@ if [[ ! -f "$source_root/Configure" ]]; then
     tar -xzf "$openssl_archive" -C "$sources"
 fi
 
-compiler_version=$(cc -dumpfullversion -dumpversion)
+compiler=${cross_prefix:+${cross_prefix}gcc}
+compiler=${compiler:-cc}
+compiler_version=$("$compiler" -dumpfullversion -dumpversion)
 marker="$install_directory/.nuvio-openssl-${openssl_version}-linux-v1"
-marker_value="$openssl_sha256 $configure_target cc-$compiler_version"
+marker_value="$openssl_sha256 $configure_target cc-$compiler_version ${cross_prefix:-native}"
 if [[ -f "$marker" \
     && "$(<"$marker")" == "$marker_value" \
     && -f "$install_directory/include/openssl/ssl.h" \
@@ -102,6 +112,7 @@ if ! (
     cd "$build_directory"
     perl "$source_root/Configure" \
         "$configure_target" \
+        ${cross_prefix:+--cross-compile-prefix="$cross_prefix"} \
         -fPIC \
         -ffile-prefix-map=/source=/nuvio-engine/source \
         --prefix="$runtime_prefix" \
@@ -128,4 +139,4 @@ cmake -E copy_directory \
     "$install_directory"
 printf '%s\n' "$marker_value" > "$marker"
 
-echo "built OpenSSL ${openssl_version} for Linux $target_architecture"
+echo "built OpenSSL ${openssl_version} for Linux $target_architecture${cross_prefix:+ (cross-compiled)}"

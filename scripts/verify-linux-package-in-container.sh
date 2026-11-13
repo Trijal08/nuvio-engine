@@ -8,10 +8,34 @@ fi
 archive=$1
 target_architecture=$2
 engine_root=/source
-if [[ "$(uname -s)" != Linux || "$(uname -m)" != "$target_architecture" ]]; then
-    echo "verification must run in the matching Linux container" >&2
+if [[ "$(uname -s)" != Linux ]]; then
+    echo "verification must run in a Linux container" >&2
     exit 2
 fi
+
+# A cross-compiled package is inspected with the binutils that understand the
+# target and its runtime check is executed through the user-mode emulator.
+cross_prefix=""
+emulator=()
+if [[ "$(uname -m)" != "$target_architecture" ]]; then
+    cross_prefix="$target_architecture-linux-gnu-"
+    emulator=(
+        "/usr/bin/qemu-$target_architecture-static"
+        "-L"
+        "/usr/$target_architecture-linux-gnu"
+    )
+fi
+readelf_tool="${cross_prefix}readelf"
+nm_tool="${cross_prefix}nm"
+strings_tool="${cross_prefix}strings"
+c_compiler=${cross_prefix:+${cross_prefix}gcc}
+c_compiler=${c_compiler:-cc}
+for tool in "$readelf_tool" "$nm_tool" "$strings_tool" "$c_compiler" ${emulator[0]+"${emulator[0]}"}; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "missing verification tool: $tool" >&2
+        exit 2
+    fi
+done
 if ! (
     cd "$(dirname "$archive")"
     sha256sum --check "$(basename "$archive").sha256"
@@ -51,25 +75,25 @@ case "$target_architecture" in
     aarch64) expected_machine='AArch64' ;;
     *) fail "unsupported architecture" ;;
 esac
-readelf -h "$library" | grep -E "Machine:.*$expected_machine" >/dev/null || fail "wrong ELF machine"
-readelf -d "$library" \
+"$readelf_tool" -h "$library" | grep -E "Machine:.*$expected_machine" >/dev/null || fail "wrong ELF machine"
+"$readelf_tool" -d "$library" \
     | grep -F "SONAME" \
     | grep -F "[libnuvio_engine.so.$engine_soversion]" >/dev/null || fail "wrong SONAME"
-if readelf -d "$library" | grep -E 'RPATH|RUNPATH' >/dev/null; then
+if "$readelf_tool" -d "$library" | grep -E 'RPATH|RUNPATH' >/dev/null; then
     fail "shared library contains an RPATH"
 fi
-readelf -lW "$library" | grep -E 'GNU_RELRO' >/dev/null || fail "GNU RELRO is missing"
-readelf -d "$library" | grep -E 'BIND_NOW|FLAGS.*NOW' >/dev/null || fail "immediate binding is missing"
-if readelf -d "$library" | grep -E 'TEXTREL' >/dev/null; then
+"$readelf_tool" -lW "$library" | grep -E 'GNU_RELRO' >/dev/null || fail "GNU RELRO is missing"
+"$readelf_tool" -d "$library" | grep -E 'BIND_NOW|FLAGS.*NOW' >/dev/null || fail "immediate binding is missing"
+if "$readelf_tool" -d "$library" | grep -E 'TEXTREL' >/dev/null; then
     fail "shared library contains text relocations"
 fi
-stack_flags=$(readelf -lW "$library" | awk '$1 == "GNU_STACK" { print $(NF - 1) }')
+stack_flags=$("$readelf_tool" -lW "$library" | awk '$1 == "GNU_STACK" { print $(NF - 1) }')
 [[ -n "$stack_flags" ]] || fail "GNU_STACK metadata is missing"
 if [[ "$stack_flags" == *E* ]]; then
     fail "shared library requests an executable stack"
 fi
 
-needed=$(readelf -d "$library" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')
+needed=$("$readelf_tool" -d "$library" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')
 if grep -Eq 'libssl|libcrypto|libtorrent|libboost' <<< "$needed"; then
     fail "private native dependency remains dynamically linked"
 fi
@@ -105,7 +129,7 @@ nuvio_engine_version_string
 EOF
 )
 actual_symbols=$(
-    nm -D --defined-only "$library" \
+    "$nm_tool" -D --defined-only "$library" \
         | awk '$2 ~ /^[TDB]$/ { print $3 }' \
         | sed 's/@@NUVIO_ENGINE_1\.0$//' \
         | LC_ALL=C sort
@@ -114,10 +138,10 @@ if [[ "$actual_symbols" != "$expected_symbols" ]]; then
     diff -u <(printf '%s\n' "$expected_symbols") <(printf '%s\n' "$actual_symbols") || true
     fail "dynamic export surface differs from the C ABI"
 fi
-readelf --version-info "$library" | grep -E 'NUVIO_ENGINE_1\.0' >/dev/null || fail "ABI version node is missing"
+"$readelf_tool" --version-info "$library" | grep -E 'NUVIO_ENGINE_1\.0' >/dev/null || fail "ABI version node is missing"
 
 maximum_glibc=$(
-    readelf --version-info "$library" \
+    "$readelf_tool" --version-info "$library" \
         | grep -Eo 'GLIBC_[0-9]+\.[0-9]+' \
         | sed 's/GLIBC_//' \
         | sort -Vu \
@@ -127,7 +151,7 @@ if [[ "$(printf '%s\n' "$maximum_glibc" 2.35 | sort -V | tail -n 1)" != 2.35 ]];
     fail "binary requires glibc $maximum_glibc"
 fi
 
-strings "$library" > "$temporary/library.strings"
+"$strings_tool" "$library" > "$temporary/library.strings"
 if grep -Eq '^/source(/|$)|/tmp/|/var/tmp/' "$temporary/library.strings"; then
     grep -E '^/source(/|$)|/tmp/|/var/tmp/' "$temporary/library.strings" | sed -n '1,20p' >&2
     fail "binary exposes a local build path"
@@ -150,13 +174,13 @@ for pair in "${license_pairs[@]}"; do
     cmp -s "$packaged" "$source" || fail "license mismatch: $(basename "$packaged")"
 done
 
-cc \
+"$c_compiler" \
     "$engine_root/tests/c_api_smoke.c" \
     -I "$package/include" \
     -L "$package/lib" \
     -lnuvio_engine \
     -Wl,-rpath,"$package/lib" \
     -o "$temporary/package-smoke"
-"$temporary/package-smoke"
+"${emulator[@]}" "$temporary/package-smoke"
 
-echo "verified Linux $target_architecture package, ABI, TLS, licenses, and runtime"
+echo "verified Linux $target_architecture package, ABI, TLS, licenses, and runtime${cross_prefix:+ (cross-compiled)}"

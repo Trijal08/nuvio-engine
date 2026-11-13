@@ -11,14 +11,26 @@ if ! docker info >/dev/null 2>&1; then
     exit 2
 fi
 
+# Both packages are built in a container that matches the build machine, so
+# the architecture that is not native is cross-compiled rather than emulated.
+# Only its test suite runs under the user-mode emulator.
+host_platform=$(docker version --format '{{.Server.Arch}}' 2>/dev/null || true)
+case "$host_platform" in
+    amd64 | arm64) ;;
+    *)
+        case "$(uname -m)" in
+            x86_64) host_platform=amd64 ;;
+            aarch64 | arm64) host_platform=arm64 ;;
+            *) echo "unsupported build machine: $(uname -m)" >&2; exit 2 ;;
+        esac
+        ;;
+esac
+
+mkdir -p "$distribution_root"
 for target_architecture in x86_64 aarch64; do
-    case "$target_architecture" in
-        x86_64) platform=linux/amd64 ;;
-        aarch64) platform=linux/arm64 ;;
-    esac
-    mkdir -p "$distribution_root"
     docker build \
-        --platform "$platform" \
+        --platform "linux/$host_platform" \
+        --build-arg "NUVIO_LINUX_ARCH=$target_architecture" \
         --file "$dockerfile_root/Dockerfile" \
         --target artifact \
         --output "type=local,dest=$distribution_root" \

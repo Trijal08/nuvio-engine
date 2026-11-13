@@ -33,17 +33,46 @@ RUN apt-get update \
 
 WORKDIR /source
 
-FROM toolchain AS package
+# A package for the build machine's own architecture is compiled and tested
+# natively. Any other architecture is cross-compiled with the GNU toolchain and
+# exercised under the matching user-mode emulator, so only the test suite runs
+# emulated instead of the whole libtorrent, Boost, and OpenSSL build.
+FROM toolchain AS cross-toolchain
+ARG DEBIAN_FRONTEND=noninteractive
 ARG TARGETARCH
+ARG NUVIO_LINUX_ARCH
+RUN case "$TARGETARCH" in \
+        amd64) host_architecture=x86_64 ;; \
+        arm64) host_architecture=aarch64 ;; \
+        *) exit 2 ;; \
+    esac \
+    && target_architecture="${NUVIO_LINUX_ARCH:-$host_architecture}" \
+    && if [ "$target_architecture" != "$host_architecture" ]; then \
+        case "$target_architecture" in \
+            aarch64) cross_package=crossbuild-essential-arm64 ;; \
+            x86_64) cross_package=crossbuild-essential-amd64 ;; \
+            *) exit 2 ;; \
+        esac \
+        && apt-get update \
+        && apt-get install --yes --no-install-recommends \
+            "$cross_package" \
+            qemu-user-static \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+FROM cross-toolchain AS package
+ARG TARGETARCH
+ARG NUVIO_LINUX_ARCH
 COPY . /source
 RUN --mount=type=cache,id=nuvio-linux-deps-${TARGETARCH},target=/source/platform/linux/.deps \
     --mount=type=cache,id=nuvio-linux-build-${TARGETARCH},target=/source/platform/linux/build \
     case "$TARGETARCH" in \
-        amd64) target_architecture=x86_64 ;; \
-        arm64) target_architecture=aarch64 ;; \
+        amd64) host_architecture=x86_64 ;; \
+        arm64) host_architecture=aarch64 ;; \
         *) exit 2 ;; \
     esac \
-    && /source/scripts/build-linux-package-in-container.sh "$target_architecture"
+    && /source/scripts/build-linux-package-in-container.sh \
+        "${NUVIO_LINUX_ARCH:-$host_architecture}"
 
 FROM scratch AS artifact
 COPY --from=package /source/platform/linux/dist/ /
